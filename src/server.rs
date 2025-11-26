@@ -26,11 +26,15 @@ use uts2ts;
 
 /// Returns the upload path for a given token.
 ///
-/// If auth tokens are configured and a valid token is provided, returns a token-specific
+/// If tokens are configured and a valid token is provided, returns a token-specific
 /// directory. Otherwise, returns the base upload path.
+#[allow(deprecated)]
 fn get_upload_path_for_token(request: &HttpRequest, config: &Config) -> PathBuf {
-    // Only use per-token directories if auth tokens are configured
-    if config.server.auth_tokens.is_some() {
+    // Only use per-token directories if tokens are configured (unified or legacy)
+    if config.server.tokens.is_some()
+        || config.server.auth_tokens.is_some()
+        || config.server.delete_tokens.is_some()
+    {
         if let Some(token) = get_auth_token(request, config) {
             let token_dir = token_to_dir_name(&token);
             return config.server.upload_path.join(token_dir);
@@ -128,8 +132,12 @@ async fn serve(
         }
     }
     
-    // If still not found and auth tokens are configured, search all token directories
-    if (!path.is_file() || !path.exists()) && config.server.auth_tokens.is_some() {
+    // If still not found and tokens are configured, search all token directories
+    #[allow(deprecated)]
+    let tokens_configured = config.server.tokens.is_some()
+        || config.server.auth_tokens.is_some()
+        || config.server.delete_tokens.is_some();
+    if (!path.is_file() || !path.exists()) && tokens_configured {
         if let Some(tokens) = config.get_tokens(TokenType::Auth) {
             for token in tokens {
                 let token_upload_path = config.server.upload_path.join(token_to_dir_name(&token));
@@ -907,6 +915,104 @@ mod tests {
             .to_request();
         let serve_response = test::call_service(&app, serve_request).await;
         assert_eq!(StatusCode::OK, serve_response.status());
+
+        // Clean up
+        fs::remove_dir_all(test_upload_dir)?;
+
+        Ok(())
+    }
+
+    #[actix_web::test]
+    async fn test_unified_tokens() -> Result<(), Error> {
+        let mut config = Config::default();
+        config.server.expose_list = Some(true);
+
+        let test_upload_dir = "test_upload_unified_tokens";
+        fs::create_dir_all(test_upload_dir)?;
+        config.server.upload_path = PathBuf::from(test_upload_dir);
+
+        // Set up unified tokens (works for both auth and delete)
+        let token1 = "unified_token1";
+        let token2 = "unified_token2";
+        config.server.tokens = Some([token1.to_string(), token2.to_string()].into());
+
+        let app = test::init_service(
+            App::new()
+                .app_data(Data::new(RwLock::new(config.clone())))
+                .app_data(Data::new(Client::default()))
+                .configure(configure_routes),
+        )
+        .await;
+
+        // Upload a file using token1
+        let filename1 = "unified_token1_file.txt";
+        let content1 = "content from unified_token1";
+        let response1 = test::call_service(
+            &app,
+            get_multipart_request(content1, "file", filename1)
+                .insert_header((
+                    AUTHORIZATION,
+                    header::HeaderValue::from_static("basic unified_token1"),
+                ))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(StatusCode::OK, response1.status());
+
+        // Upload a file using token2
+        let filename2 = "unified_token2_file.txt";
+        let content2 = "content from unified_token2";
+        let response2 = test::call_service(
+            &app,
+            get_multipart_request(content2, "file", filename2)
+                .insert_header((
+                    AUTHORIZATION,
+                    header::HeaderValue::from_static("basic unified_token2"),
+                ))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(StatusCode::OK, response2.status());
+
+        // Verify files are stored in token-specific directories
+        let token1_dir = PathBuf::from(test_upload_dir).join(util::token_to_dir_name(token1));
+        let token2_dir = PathBuf::from(test_upload_dir).join(util::token_to_dir_name(token2));
+
+        assert!(
+            token1_dir.join(filename1).exists(),
+            "File should exist in token1's directory"
+        );
+        assert!(
+            token2_dir.join(filename2).exists(),
+            "File should exist in token2's directory"
+        );
+
+        // Token1 can delete their own file
+        let delete_own_request = TestRequest::delete()
+            .uri(&format!("/{filename1}"))
+            .insert_header((
+                AUTHORIZATION,
+                header::HeaderValue::from_static("basic unified_token1"),
+            ))
+            .to_request();
+        let delete_response = test::call_service(&app, delete_own_request).await;
+        assert_eq!(StatusCode::OK, delete_response.status());
+        assert!(!token1_dir.join(filename1).exists());
+
+        // Token1 CANNOT delete token2's file (should fail with 404 - file not found in their folder)
+        let delete_others_request = TestRequest::delete()
+            .uri(&format!("/{filename2}"))
+            .insert_header((
+                AUTHORIZATION,
+                header::HeaderValue::from_static("basic unified_token1"),
+            ))
+            .to_request();
+        let delete_response = test::call_service(&app, delete_others_request).await;
+        assert_eq!(StatusCode::NOT_FOUND, delete_response.status());
+        assert!(
+            token2_dir.join(filename2).exists(),
+            "Token2's file should still exist"
+        );
 
         // Clean up
         fs::remove_dir_all(test_upload_dir)?;

@@ -291,12 +291,28 @@ $ echo "AUTH_TOKEN=$(openssl rand -base64 16)" > .env
 $ rustypaste
 ```
 
+#### Unified Tokens
+
+You can use unified tokens that grant both upload and delete permissions for a token-specific folder. This is the recommended approach when you want each user to have isolated storage with full access to their own files.
+
+Configure unified tokens using any of these options:
+- Via the array field `[server].tokens` in your `config.toml`
+- Via the `TOKEN` environment variable (for a single token)
+- Via the `TOKENS_FILE` environment variable (path to a file with newline-separated tokens)
+
+When unified tokens are configured:
+- Each token gets its own isolated folder for file storage
+- Users can upload files to their folder and delete only their own files
+- Files can be served to anyone (public access for reading)
+
+#### Legacy Authentication Tokens (Deprecated)
+
 There are 2 options for setting multiple auth tokens:
 
-- Via the array field `[server].auth_tokens` in your `config.toml`.
-- Or by writing a newline separated list to a file and passing its path to rustypaste via `AUTH_TOKENS_FILE` and `DELETE_TOKENS_FILE` respectively.
+- Via the array field `[server].auth_tokens` in your `config.toml` (deprecated, use `[server].tokens`)
+- Or by writing a newline separated list to a file and passing its path to rustypaste via `AUTH_TOKENS_FILE` and `DELETE_TOKENS_FILE` respectively
 
-> If neither `AUTH_TOKEN`, `AUTH_TOKENS_FILE` nor `[server].auth_tokens` are set, the server will not require any authentication.
+> If neither `TOKEN`, `AUTH_TOKEN`, `TOKENS_FILE`, `AUTH_TOKENS_FILE` nor `[server].tokens` or `[server].auth_tokens` are set, the server will not require any authentication.
 >
 > Exception is the `DELETE` endpoint, which requires at least one token to be set. See [deleting files from server](#delete-file-from-server) for more information.
 

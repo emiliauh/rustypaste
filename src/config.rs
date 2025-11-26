@@ -1,6 +1,9 @@
 use crate::mime::MimeMatcher;
 use crate::random::RandomURLConfig;
-use crate::{AUTH_TOKENS_FILE_ENV, AUTH_TOKEN_ENV, DELETE_TOKENS_FILE_ENV, DELETE_TOKEN_ENV};
+use crate::{
+    AUTH_TOKENS_FILE_ENV, AUTH_TOKEN_ENV, DELETE_TOKENS_FILE_ENV, DELETE_TOKEN_ENV,
+    TOKENS_FILE_ENV, TOKEN_ENV,
+};
 use byte_unit::Byte;
 use config::{self, ConfigError};
 use std::collections::HashSet;
@@ -50,9 +53,10 @@ pub struct ServerConfig {
     #[serde(default, with = "humantime_serde")]
     pub timeout: Option<Duration>,
     /// Authentication token.
-    #[deprecated(note = "use [server].auth_tokens instead")]
+    #[deprecated(note = "use [server].tokens instead")]
     pub auth_token: Option<String>,
     /// Authentication tokens.
+    #[deprecated(note = "use [server].tokens instead")]
     pub auth_tokens: Option<HashSet<String>>,
     /// Expose version.
     pub expose_version: Option<bool>,
@@ -67,7 +71,11 @@ pub struct ServerConfig {
     /// Path of the JSON index.
     pub expose_list: Option<bool>,
     /// Authentication tokens for deleting.
+    #[deprecated(note = "use [server].tokens instead")]
     pub delete_tokens: Option<HashSet<String>>,
+    /// Unified tokens for both authentication and deletion.
+    /// Each token grants both upload and delete permissions for the token's folder.
+    pub tokens: Option<HashSet<String>>,
 }
 
 /// Enum representing different strategies for handling spaces in filenames.
@@ -153,18 +161,57 @@ impl Config {
     }
 
     /// Retrieves all configured auth/delete tokens.
+    ///
+    /// This method supports both the unified `tokens` configuration and the deprecated
+    /// separate `auth_tokens` and `delete_tokens` configurations. When using unified tokens,
+    /// each token grants both upload and delete permissions for that token's folder.
+    #[allow(deprecated)]
     pub fn get_tokens(&self, token_type: TokenType) -> Option<HashSet<String>> {
-        let mut tokens = match token_type {
-            TokenType::Auth => {
-                let mut tokens: HashSet<_> = self.server.auth_tokens.clone().unwrap_or_default();
+        let mut tokens: HashSet<String> = HashSet::new();
 
-                #[allow(deprecated)]
+        // First, add unified tokens (these work for both Auth and Delete)
+        if let Some(unified) = &self.server.tokens {
+            tokens.extend(unified.clone());
+        }
+
+        // Add tokens from unified env var
+        if let Ok(env_token) = env::var(TOKEN_ENV) {
+            tokens.insert(env_token);
+        }
+
+        // Add tokens from unified tokens file
+        if let Ok(env_path) = env::var(TOKENS_FILE_ENV) {
+            match read_to_string(&env_path) {
+                Ok(s) => {
+                    s.lines().filter(|l| !l.trim().is_empty()).for_each(|l| {
+                        tokens.insert(l.to_string());
+                    });
+                }
+                Err(e) => {
+                    error!("failed to read tokens from file ({env_path}) ({e})");
+                }
+            };
+        }
+
+        // Then, add type-specific tokens for backward compatibility
+        match token_type {
+            TokenType::Auth => {
+                // Add deprecated auth_tokens
+                if let Some(auth) = &self.server.auth_tokens {
+                    tokens.extend(auth.clone());
+                }
+
+                // Add deprecated single auth_token
                 if let Some(token) = &self.server.auth_token {
                     tokens.insert(token.to_string());
                 }
+
+                // Add from AUTH_TOKEN env var
                 if let Ok(env_token) = env::var(AUTH_TOKEN_ENV) {
                     tokens.insert(env_token);
                 }
+
+                // Add from AUTH_TOKENS_FILE env var
                 if let Ok(env_path) = env::var(AUTH_TOKENS_FILE_ENV) {
                     match read_to_string(&env_path) {
                         Ok(s) => {
@@ -179,16 +226,19 @@ impl Config {
                         }
                     };
                 }
-
-                tokens
             }
             TokenType::Delete => {
-                let mut tokens: HashSet<_> = self.server.delete_tokens.clone().unwrap_or_default();
+                // Add deprecated delete_tokens
+                if let Some(delete) = &self.server.delete_tokens {
+                    tokens.extend(delete.clone());
+                }
 
+                // Add from DELETE_TOKEN env var
                 if let Ok(env_token) = env::var(DELETE_TOKEN_ENV) {
                     tokens.insert(env_token);
                 }
 
+                // Add from DELETE_TOKENS_FILE env var
                 if let Ok(env_path) = env::var(DELETE_TOKENS_FILE_ENV) {
                     match read_to_string(&env_path) {
                         Ok(s) => {
@@ -201,10 +251,8 @@ impl Config {
                         }
                     };
                 }
-
-                tokens
             }
-        };
+        }
 
         // filter out blank tokens
         tokens.retain(|v| !v.trim().is_empty());
@@ -215,7 +263,13 @@ impl Config {
     #[allow(deprecated)]
     pub fn warn_deprecation(&self) {
         if self.server.auth_token.is_some() {
-            warn!("[server].auth_token is deprecated, please use [server].auth_tokens");
+            warn!("[server].auth_token is deprecated, please use [server].tokens");
+        }
+        if self.server.auth_tokens.is_some() {
+            warn!("[server].auth_tokens is deprecated, please use [server].tokens");
+        }
+        if self.server.delete_tokens.is_some() {
+            warn!("[server].delete_tokens is deprecated, please use [server].tokens");
         }
         if self.server.landing_page.is_some() {
             warn!("[server].landing_page is deprecated, please use [landing_page].text");
@@ -313,6 +367,73 @@ mod tests {
         config.server.delete_tokens = Some(HashSet::new());
         assert_eq!(None, config.get_tokens(TokenType::Auth));
         assert_eq!(None, config.get_tokens(TokenType::Delete));
+
+        Ok(())
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_unified_tokens() -> Result<(), ConfigError> {
+        let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.toml");
+        let mut config = Config::parse(&config_path)?;
+
+        // Set up unified tokens
+        config.server.tokens = Some(["unified_token".to_string()].into());
+        config.server.auth_tokens = None;
+        config.server.delete_tokens = None;
+
+        // Unified tokens should work for both Auth and Delete
+        let auth_tokens = config.get_tokens(TokenType::Auth);
+        let delete_tokens = config.get_tokens(TokenType::Delete);
+
+        assert!(auth_tokens
+            .as_ref()
+            .is_some_and(|t| t.contains("unified_token")));
+        assert!(delete_tokens
+            .as_ref()
+            .is_some_and(|t| t.contains("unified_token")));
+
+        // Both should return the same tokens when only unified tokens are set
+        assert_eq!(auth_tokens, delete_tokens);
+
+        Ok(())
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_mixed_tokens() -> Result<(), ConfigError> {
+        let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.toml");
+        let mut config = Config::parse(&config_path)?;
+
+        // Set up mixed tokens: unified, auth-only, and delete-only
+        config.server.tokens = Some(["unified_token".to_string()].into());
+        config.server.auth_tokens = Some(["auth_only_token".to_string()].into());
+        config.server.delete_tokens = Some(["delete_only_token".to_string()].into());
+
+        let auth_tokens = config.get_tokens(TokenType::Auth);
+        let delete_tokens = config.get_tokens(TokenType::Delete);
+
+        // Auth should include unified + auth_only
+        assert!(auth_tokens
+            .as_ref()
+            .is_some_and(|t| t.contains("unified_token")));
+        assert!(auth_tokens
+            .as_ref()
+            .is_some_and(|t| t.contains("auth_only_token")));
+        assert!(!auth_tokens
+            .as_ref()
+            .is_some_and(|t| t.contains("delete_only_token")));
+
+        // Delete should include unified + delete_only
+        assert!(delete_tokens
+            .as_ref()
+            .is_some_and(|t| t.contains("unified_token")));
+        assert!(delete_tokens
+            .as_ref()
+            .is_some_and(|t| t.contains("delete_only_token")));
+        assert!(!delete_tokens
+            .as_ref()
+            .is_some_and(|t| t.contains("auth_only_token")));
 
         Ok(())
     }

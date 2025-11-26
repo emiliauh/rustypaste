@@ -10,6 +10,13 @@ upload_path = "./upload"
 timeout = "30s"
 expose_version = false
 expose_list = false
+# Unified tokens for both upload and delete permissions.
+# Each token grants access to its own folder for both operations.
+#tokens = [
+#  "super_secret_token1",
+#  "super_secret_token2",
+#]
+# Deprecated: use `tokens` instead. These are kept for backward compatibility.
 #auth_tokens = [
 #  "super_secret_token1",
 #  "super_secret_token2",
