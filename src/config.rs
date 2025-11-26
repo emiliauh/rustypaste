@@ -171,7 +171,7 @@ impl Config {
 
         // First, add unified tokens (these work for both Auth and Delete)
         if let Some(unified) = &self.server.tokens {
-            tokens.extend(unified.clone());
+            tokens.extend(unified.iter().cloned());
         }
 
         // Add tokens from unified env var
@@ -198,7 +198,7 @@ impl Config {
             TokenType::Auth => {
                 // Add deprecated auth_tokens
                 if let Some(auth) = &self.server.auth_tokens {
-                    tokens.extend(auth.clone());
+                    tokens.extend(auth.iter().cloned());
                 }
 
                 // Add deprecated single auth_token
@@ -230,7 +230,7 @@ impl Config {
             TokenType::Delete => {
                 // Add deprecated delete_tokens
                 if let Some(delete) = &self.server.delete_tokens {
-                    tokens.extend(delete.clone());
+                    tokens.extend(delete.iter().cloned());
                 }
 
                 // Add from DELETE_TOKEN env var
