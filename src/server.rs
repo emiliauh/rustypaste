@@ -440,60 +440,63 @@ async fn list(
     // Use token-specific upload path
     let upload_path = get_upload_path_for_token(&request, &config);
     
-    let entries: Vec<ListItem> = fs::read_dir(&upload_path)
-        .unwrap_or_else(|_| fs::read_dir(".").expect("cannot read directory"))
-        .filter_map(|entry| {
-            entry.ok().and_then(|e| {
-                let metadata = match e.metadata() {
-                    Ok(metadata) => {
-                        if metadata.is_dir() {
+    // If the upload path doesn't exist, return an empty list
+    let entries: Vec<ListItem> = match fs::read_dir(&upload_path) {
+        Ok(read_dir) => read_dir
+            .filter_map(|entry| {
+                entry.ok().and_then(|e| {
+                    let metadata = match e.metadata() {
+                        Ok(metadata) => {
+                            if metadata.is_dir() {
+                                return None;
+                            }
+                            metadata
+                        }
+                        Err(e) => {
+                            error!("failed to read metadata: {e}");
                             return None;
                         }
-                        metadata
-                    }
-                    Err(e) => {
-                        error!("failed to read metadata: {e}");
-                        return None;
-                    }
-                };
-                let mut file_name = PathBuf::from(e.file_name());
+                    };
+                    let mut file_name = PathBuf::from(e.file_name());
 
-                let creation_date_utc = metadata.created().ok().map(|v| {
-                    let millis = v
-                        .duration_since(UNIX_EPOCH)
-                        .expect("Time since UNIX epoch should be valid.")
-                        .as_millis();
-                    uts2ts::uts2ts(
-                        i64::try_from(millis).expect("UNIX time should be smaller than i64::MAX")
-                            / 1000,
-                    )
-                    .as_string()
-                });
+                    let creation_date_utc = metadata.created().ok().map(|v| {
+                        let millis = v
+                            .duration_since(UNIX_EPOCH)
+                            .expect("Time since UNIX epoch should be valid.")
+                            .as_millis();
+                        uts2ts::uts2ts(
+                            i64::try_from(millis).expect("UNIX time should be smaller than i64::MAX")
+                                / 1000,
+                        )
+                        .as_string()
+                    });
 
-                let expires_at_utc = if let Some(expiration) = file_name
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .and_then(|v| v.parse::<i64>().ok())
-                {
-                    file_name.set_extension("");
-                    if util::get_system_time().ok()?
-                        > Duration::from_millis(expiration.try_into().ok()?)
+                    let expires_at_utc = if let Some(expiration) = file_name
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .and_then(|v| v.parse::<i64>().ok())
                     {
-                        return None;
-                    }
-                    Some(uts2ts::uts2ts(expiration / 1000).as_string())
-                } else {
-                    None
-                };
-                Some(ListItem {
-                    file_name,
-                    file_size: metadata.len(),
-                    creation_date_utc,
-                    expires_at_utc,
+                        file_name.set_extension("");
+                        if util::get_system_time().ok()?
+                            > Duration::from_millis(expiration.try_into().ok()?)
+                        {
+                            return None;
+                        }
+                        Some(uts2ts::uts2ts(expiration / 1000).as_string())
+                    } else {
+                        None
+                    };
+                    Some(ListItem {
+                        file_name,
+                        file_size: metadata.len(),
+                        creation_date_utc,
+                        expires_at_utc,
+                    })
                 })
             })
-        })
-        .collect();
+            .collect(),
+        Err(_) => Vec::new(),
+    };
     Ok(HttpResponse::Ok().json(entries))
 }
 

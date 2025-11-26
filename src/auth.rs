@@ -15,7 +15,8 @@ pub fn get_auth_token(request: &HttpRequest, config: &Config) -> Option<String> 
         .headers()
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.split_whitespace().last().unwrap_or_default())?;
+        .and_then(|v| v.split_whitespace().last())
+        .filter(|s| !s.is_empty())?;
     
     // Check if the token is valid (configured in auth_tokens)
     if let Some(configured_tokens) = config.get_tokens(TokenType::Auth) {
