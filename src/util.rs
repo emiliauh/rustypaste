@@ -56,32 +56,58 @@ pub fn glob_match_file(mut path: PathBuf) -> Result<PathBuf, ActixError> {
 
 /// Returns the found expired files in the possible upload locations.
 ///
-/// Fail-safe, omits errors.
+/// This function searches both in the base upload path and in all subdirectories
+/// (including per-token directories). Fail-safe, omits errors.
 pub fn get_expired_files(base_path: &Path) -> Vec<PathBuf> {
-    [
+    let paste_types = [
         PasteType::File,
         PasteType::Oneshot,
         PasteType::Url,
         PasteType::OneshotUrl,
-    ]
-    .into_iter()
-    .filter_map(|v| v.get_path(base_path).ok())
-    .filter_map(|v| glob(&v.join("*.[0-9]*").to_string_lossy()).ok())
-    .flat_map(|glob| glob.filter_map(|v| v.ok()).collect::<Vec<PathBuf>>())
-    .filter(|path| {
-        if let Some(extension) = path
-            .extension()
-            .and_then(|v| v.to_str())
-            .and_then(|v| v.parse().ok())
-        {
-            get_system_time()
-                .map(|system_time| system_time > Duration::from_millis(extension))
-                .unwrap_or(false)
-        } else {
-            false
+    ];
+    
+    let mut paths_to_search: Vec<PathBuf> = Vec::new();
+    
+    // Add paths from the base upload directory
+    for paste_type in &paste_types {
+        if let Ok(path) = paste_type.get_path(base_path) {
+            paths_to_search.push(path);
         }
-    })
-    .collect()
+    }
+    
+    // Also search in all subdirectories (token directories)
+    if let Ok(entries) = std::fs::read_dir(base_path) {
+        for entry in entries.filter_map(Result::ok) {
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                // Add the token directory itself and its paste type subdirectories
+                for paste_type in &paste_types {
+                    if let Ok(path) = paste_type.get_path(&entry_path) {
+                        paths_to_search.push(path);
+                    }
+                }
+            }
+        }
+    }
+    
+    paths_to_search
+        .into_iter()
+        .filter_map(|v| glob(&v.join("*.[0-9]*").to_string_lossy()).ok())
+        .flat_map(|glob| glob.filter_map(|v| v.ok()).collect::<Vec<PathBuf>>())
+        .filter(|path| {
+            if let Some(extension) = path
+                .extension()
+                .and_then(|v| v.to_str())
+                .and_then(|v| v.parse().ok())
+            {
+                get_system_time()
+                    .map(|system_time| system_time > Duration::from_millis(extension))
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        })
+        .collect()
 }
 
 /// Returns the SHA256 digest of the given input.
@@ -128,6 +154,15 @@ pub fn safe_path_join<B: AsRef<Path>, P: AsRef<Path>>(base: B, part: P) -> IoRes
     }
 
     Ok(new_path)
+}
+
+/// Returns a URL-safe Base64-encoded directory name from a token.
+///
+/// This is used to create per-token storage directories.
+pub fn token_to_dir_name(token: &str) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    URL_SAFE_NO_PAD.encode(token.as_bytes())
 }
 
 /// Returns the size of the directory at the given path.
@@ -236,5 +271,17 @@ mod tests {
         assert!(safe_path_join("/foo", "/bar").is_err());
         assert!(safe_path_join("/foo/bar", "..").is_err());
         assert!(safe_path_join("/foo/bar", "../").is_err());
+    }
+
+    #[test]
+    fn test_token_to_dir_name() {
+        // Test that token_to_dir_name produces consistent, filesystem-safe output
+        assert_eq!("dGVzdC10b2tlbg", token_to_dir_name("test-token"));
+        assert_eq!("c3VwZXItc2VjcmV0LXRva2VuMQ", token_to_dir_name("super-secret-token1"));
+        // Verify no special characters that would be problematic for filesystems
+        let result = token_to_dir_name("my-secret-token");
+        assert!(!result.contains('/'));
+        assert!(!result.contains('+'));
+        assert!(!result.contains('='));
     }
 }
