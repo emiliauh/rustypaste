@@ -3,9 +3,29 @@ use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::http::header::AUTHORIZATION;
 use actix_web::http::Method;
 use actix_web::middleware::ErrorHandlerResponse;
-use actix_web::{error, web, Error};
+use actix_web::{error, web, Error, HttpRequest};
 use std::collections::HashSet;
 use std::sync::RwLock;
+
+/// Extracts the raw auth token from a request's Authorization header.
+///
+/// Returns `None` if no valid auth token is found or if auth tokens are not configured.
+pub fn get_auth_token(request: &HttpRequest, config: &Config) -> Option<String> {
+    let auth_header = request
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split_whitespace().last())
+        .filter(|s| !s.is_empty())?;
+    
+    // Check if the token is valid (configured in auth_tokens)
+    if let Some(configured_tokens) = config.get_tokens(TokenType::Auth) {
+        if configured_tokens.contains(auth_header) {
+            return Some(auth_header.to_string());
+        }
+    }
+    None
+}
 
 /// Extracts the tokens from the authorization header by token type.
 ///

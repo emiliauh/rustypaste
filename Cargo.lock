@@ -1931,6 +1931,7 @@ dependencies = [
  "actix-web",
  "actix-web-grants",
  "awc",
+ "base64",
  "byte-unit",
  "config",
  "dotenvy",

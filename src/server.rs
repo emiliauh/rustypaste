@@ -1,10 +1,10 @@
-use crate::auth::{extract_tokens, handle_unauthorized_error, unauthorized_error};
+use crate::auth::{extract_tokens, get_auth_token, handle_unauthorized_error, unauthorized_error};
 use crate::config::{Config, LandingPageConfig, TokenType};
 use crate::file::Directory;
 use crate::header::{self, ContentDisposition};
 use crate::mime as mime_util;
 use crate::paste::{Paste, PasteType};
-use crate::util::{self, safe_path_join};
+use crate::util::{self, safe_path_join, token_to_dir_name};
 use actix_files::NamedFile;
 use actix_multipart::Multipart;
 use actix_web::http::StatusCode;
@@ -23,6 +23,21 @@ use std::path::PathBuf;
 use std::sync::RwLock;
 use std::time::{Duration, UNIX_EPOCH};
 use uts2ts;
+
+/// Returns the upload path for a given token.
+///
+/// If auth tokens are configured and a valid token is provided, returns a token-specific
+/// directory. Otherwise, returns the base upload path.
+fn get_upload_path_for_token(request: &HttpRequest, config: &Config) -> PathBuf {
+    // Only use per-token directories if auth tokens are configured
+    if config.server.auth_tokens.is_some() {
+        if let Some(token) = get_auth_token(request, config) {
+            let token_dir = token_to_dir_name(&token);
+            return config.server.upload_path.join(token_dir);
+        }
+    }
+    config.server.upload_path.clone()
+}
 
 /// Shows the landing page.
 #[get("/")]
@@ -89,11 +104,19 @@ async fn serve(
     let config = config
         .read()
         .map_err(|_| error::ErrorInternalServerError("cannot acquire config"))?;
-    let mut path = util::glob_match_file(safe_path_join(&config.server.upload_path, &*file)?)?;
+    
+    // Determine the upload path to search in
+    let upload_path = get_upload_path_for_token(&request, &config);
+    
+    // If auth tokens are configured, first check in the token-specific directory (if valid token provided)
+    // Then fall back to searching all token directories
+    let mut path = util::glob_match_file(safe_path_join(&upload_path, &*file)?)?;
     let mut paste_type = PasteType::File;
+    
     if !path.exists() || path.is_dir() {
+        // Try other paste types within the same upload path
         for type_ in &[PasteType::Url, PasteType::Oneshot, PasteType::OneshotUrl] {
-            let alt_path = safe_path_join(type_.get_path(&config.server.upload_path)?, &*file)?;
+            let alt_path = safe_path_join(type_.get_path(&upload_path)?, &*file)?;
             let alt_path = util::glob_match_file(alt_path)?;
             if alt_path.exists()
                 || path.file_name().and_then(|v| v.to_str()) == Some(&type_.get_dir())
@@ -104,6 +127,40 @@ async fn serve(
             }
         }
     }
+    
+    // If still not found and auth tokens are configured, search all token directories
+    if (!path.is_file() || !path.exists()) && config.server.auth_tokens.is_some() {
+        if let Some(tokens) = config.get_tokens(TokenType::Auth) {
+            for token in tokens {
+                let token_upload_path = config.server.upload_path.join(token_to_dir_name(&token));
+                if let Ok(token_path) = safe_path_join(&token_upload_path, &*file) {
+                    let token_path = util::glob_match_file(token_path)?;
+                    if token_path.is_file() && token_path.exists() {
+                        path = token_path;
+                        paste_type = PasteType::File;
+                        break;
+                    }
+                }
+                // Also check other paste types in this token directory
+                for type_ in &[PasteType::Url, PasteType::Oneshot, PasteType::OneshotUrl] {
+                    if let Ok(type_path) = type_.get_path(&token_upload_path) {
+                        if let Ok(alt_path) = safe_path_join(&type_path, &*file) {
+                            let alt_path = util::glob_match_file(alt_path)?;
+                            if alt_path.is_file() && alt_path.exists() {
+                                path = alt_path;
+                                paste_type = *type_;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if path.is_file() && path.exists() {
+                    break;
+                }
+            }
+        }
+    }
+    
     if !path.is_file() || !path.exists() {
         return Err(error::ErrorNotFound("file is not found or expired :(\n"));
     }
@@ -152,13 +209,17 @@ async fn serve(
 #[delete("/{file}")]
 #[actix_web_grants::protect("TokenType::Delete", ty = TokenType, error = unauthorized_error)]
 async fn delete(
+    request: HttpRequest,
     file: web::Path<String>,
     config: web::Data<RwLock<Config>>,
 ) -> Result<HttpResponse, Error> {
     let config = config
         .read()
         .map_err(|_| error::ErrorInternalServerError("cannot acquire config"))?;
-    let path = util::glob_match_file(safe_path_join(&config.server.upload_path, &*file)?)?;
+    
+    // Use token-specific upload path
+    let upload_path = get_upload_path_for_token(&request, &config);
+    let path = util::glob_match_file(safe_path_join(&upload_path, &*file)?)?;
     if !path.is_file() || !path.exists() {
         return Err(error::ErrorNotFound("file is not found or expired :(\n"));
     }
@@ -221,6 +282,21 @@ async fn upload(
             .default_expiry
             .and_then(|v| time.checked_add(v).map(|t| t.as_millis()));
     }
+    
+    // Get the token-specific upload path
+    let token_upload_path = {
+        let config = config
+            .read()
+            .map_err(|_| error::ErrorInternalServerError("cannot acquire config"))?;
+        get_upload_path_for_token(&request, &config)
+    };
+    
+    // Create the token-specific directory if it doesn't exist
+    fs::create_dir_all(&token_upload_path)?;
+    for paste_type in &[PasteType::Url, PasteType::Oneshot, PasteType::OneshotUrl] {
+        fs::create_dir_all(paste_type.get_path(&token_upload_path)?)?;
+    }
+    
     let mut urls: Vec<String> = Vec::new();
     while let Some(item) = payload.next().await {
         let header_filename = header::parse_header_filename(request.headers())?;
@@ -254,10 +330,8 @@ async fn upload(
                     .unwrap_or(true)
             {
                 let bytes_checksum = util::sha256_digest(&*bytes)?;
-                let config = config
-                    .read()
-                    .map_err(|_| error::ErrorInternalServerError("cannot acquire config"))?;
-                if let Some(file) = Directory::try_from(config.server.upload_path.as_path())?
+                // Check for duplicate files in the token-specific directory
+                if let Some(file) = Directory::try_from(token_upload_path.as_path())?
                     .get_file(bytes_checksum)
                 {
                     urls.push(format!(
@@ -280,23 +354,35 @@ async fn upload(
                     let config = config
                         .read()
                         .map_err(|_| error::ErrorInternalServerError("cannot acquire config"))?;
+                    // Create a config clone with the token-specific upload path
+                    let mut upload_config = config.clone();
+                    upload_config.server.upload_path = token_upload_path.clone();
                     paste.store_file(
                         content.get_file_name()?,
                         expiry_date,
                         header_filename,
-                        &config,
+                        &upload_config,
                     )?
                 }
                 PasteType::RemoteFile => {
+                    // Create a config with the token-specific upload path for remote file
+                    let mut upload_config = config
+                        .read()
+                        .map_err(|_| error::ErrorInternalServerError("cannot acquire config"))?
+                        .clone();
+                    upload_config.server.upload_path = token_upload_path.clone();
                     paste
-                        .store_remote_file(expiry_date, &client, &config)
+                        .store_remote_file(expiry_date, &client, &RwLock::new(upload_config))
                         .await?
                 }
                 PasteType::Url | PasteType::OneshotUrl => {
                     let config = config
                         .read()
                         .map_err(|_| error::ErrorInternalServerError("cannot acquire config"))?;
-                    paste.store_url(expiry_date, header_filename, &config)?
+                    // Create a config clone with the token-specific upload path
+                    let mut upload_config = config.clone();
+                    upload_config.server.upload_path = token_upload_path.clone();
+                    paste.store_url(expiry_date, header_filename, &upload_config)?
                 }
             };
             info!(
@@ -338,7 +424,10 @@ pub struct ListItem {
 /// Returns the list of files.
 #[get("/list")]
 #[actix_web_grants::protect("TokenType::Auth", ty = TokenType, error = unauthorized_error)]
-async fn list(config: web::Data<RwLock<Config>>) -> Result<HttpResponse, Error> {
+async fn list(
+    request: HttpRequest,
+    config: web::Data<RwLock<Config>>,
+) -> Result<HttpResponse, Error> {
     let config = config
         .read()
         .map_err(|_| error::ErrorInternalServerError("cannot acquire config"))?
@@ -347,59 +436,67 @@ async fn list(config: web::Data<RwLock<Config>>) -> Result<HttpResponse, Error> 
         warn!("server is not configured to expose list endpoint");
         Err(error::ErrorNotFound(""))?;
     }
-    let entries: Vec<ListItem> = fs::read_dir(config.server.upload_path)?
-        .filter_map(|entry| {
-            entry.ok().and_then(|e| {
-                let metadata = match e.metadata() {
-                    Ok(metadata) => {
-                        if metadata.is_dir() {
+    
+    // Use token-specific upload path
+    let upload_path = get_upload_path_for_token(&request, &config);
+    
+    // If the upload path doesn't exist, return an empty list
+    let entries: Vec<ListItem> = match fs::read_dir(&upload_path) {
+        Ok(read_dir) => read_dir
+            .filter_map(|entry| {
+                entry.ok().and_then(|e| {
+                    let metadata = match e.metadata() {
+                        Ok(metadata) => {
+                            if metadata.is_dir() {
+                                return None;
+                            }
+                            metadata
+                        }
+                        Err(e) => {
+                            error!("failed to read metadata: {e}");
                             return None;
                         }
-                        metadata
-                    }
-                    Err(e) => {
-                        error!("failed to read metadata: {e}");
-                        return None;
-                    }
-                };
-                let mut file_name = PathBuf::from(e.file_name());
+                    };
+                    let mut file_name = PathBuf::from(e.file_name());
 
-                let creation_date_utc = metadata.created().ok().map(|v| {
-                    let millis = v
-                        .duration_since(UNIX_EPOCH)
-                        .expect("Time since UNIX epoch should be valid.")
-                        .as_millis();
-                    uts2ts::uts2ts(
-                        i64::try_from(millis).expect("UNIX time should be smaller than i64::MAX")
-                            / 1000,
-                    )
-                    .as_string()
-                });
+                    let creation_date_utc = metadata.created().ok().map(|v| {
+                        let millis = v
+                            .duration_since(UNIX_EPOCH)
+                            .expect("Time since UNIX epoch should be valid.")
+                            .as_millis();
+                        uts2ts::uts2ts(
+                            i64::try_from(millis).expect("UNIX time should be smaller than i64::MAX")
+                                / 1000,
+                        )
+                        .as_string()
+                    });
 
-                let expires_at_utc = if let Some(expiration) = file_name
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .and_then(|v| v.parse::<i64>().ok())
-                {
-                    file_name.set_extension("");
-                    if util::get_system_time().ok()?
-                        > Duration::from_millis(expiration.try_into().ok()?)
+                    let expires_at_utc = if let Some(expiration) = file_name
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .and_then(|v| v.parse::<i64>().ok())
                     {
-                        return None;
-                    }
-                    Some(uts2ts::uts2ts(expiration / 1000).as_string())
-                } else {
-                    None
-                };
-                Some(ListItem {
-                    file_name,
-                    file_size: metadata.len(),
-                    creation_date_utc,
-                    expires_at_utc,
+                        file_name.set_extension("");
+                        if util::get_system_time().ok()?
+                            > Duration::from_millis(expiration.try_into().ok()?)
+                        {
+                            return None;
+                        }
+                        Some(uts2ts::uts2ts(expiration / 1000).as_string())
+                    } else {
+                        None
+                    };
+                    Some(ListItem {
+                        file_name,
+                        file_size: metadata.len(),
+                        creation_date_utc,
+                        expires_at_utc,
+                    })
                 })
             })
-        })
-        .collect();
+            .collect(),
+        Err(_) => Vec::new(),
+    };
     Ok(HttpResponse::Ok().json(entries))
 }
 
@@ -725,6 +822,93 @@ mod tests {
 
         assert!(result.is_empty());
 
+        fs::remove_dir_all(test_upload_dir)?;
+
+        Ok(())
+    }
+
+    #[actix_web::test]
+    async fn test_per_token_storage() -> Result<(), Error> {
+        let mut config = Config::default();
+        config.server.expose_list = Some(true);
+
+        let test_upload_dir = "test_upload_per_token";
+        fs::create_dir_all(test_upload_dir)?;
+        config.server.upload_path = PathBuf::from(test_upload_dir);
+        
+        // Set up auth tokens
+        let token1 = "token1";
+        let token2 = "token2";
+        config.server.auth_tokens = Some([token1.to_string(), token2.to_string()].into());
+
+        let app = test::init_service(
+            App::new()
+                .app_data(Data::new(RwLock::new(config.clone())))
+                .app_data(Data::new(Client::default()))
+                .configure(configure_routes),
+        )
+        .await;
+
+        // Upload a file using token1
+        let filename1 = "token1_file.txt";
+        let content1 = "content from token1";
+        let response1 = test::call_service(
+            &app,
+            get_multipart_request(content1, "file", filename1)
+                .insert_header((AUTHORIZATION, header::HeaderValue::from_static("basic token1")))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(StatusCode::OK, response1.status());
+
+        // Upload a file using token2
+        let filename2 = "token2_file.txt";
+        let content2 = "content from token2";
+        let response2 = test::call_service(
+            &app,
+            get_multipart_request(content2, "file", filename2)
+                .insert_header((AUTHORIZATION, header::HeaderValue::from_static("basic token2")))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(StatusCode::OK, response2.status());
+
+        // Verify files are stored in token-specific directories
+        let token1_dir = PathBuf::from(test_upload_dir).join(util::token_to_dir_name(token1));
+        let token2_dir = PathBuf::from(test_upload_dir).join(util::token_to_dir_name(token2));
+        
+        assert!(token1_dir.join(filename1).exists(), "File should exist in token1's directory");
+        assert!(token2_dir.join(filename2).exists(), "File should exist in token2's directory");
+        assert!(!token1_dir.join(filename2).exists(), "Token2's file should NOT be in token1's directory");
+        assert!(!token2_dir.join(filename1).exists(), "Token1's file should NOT be in token2's directory");
+
+        // List files using token1 - should only see token1's file
+        let list_request1 = TestRequest::get()
+            .uri("/list")
+            .insert_header((AUTHORIZATION, header::HeaderValue::from_static("basic token1")))
+            .to_request();
+        let result1: Vec<ListItem> = test::call_and_read_body_json(&app, list_request1).await;
+        assert_eq!(result1.len(), 1);
+        assert_eq!(result1[0].file_name, PathBuf::from(filename1));
+
+        // List files using token2 - should only see token2's file
+        let list_request2 = TestRequest::get()
+            .uri("/list")
+            .insert_header((AUTHORIZATION, header::HeaderValue::from_static("basic token2")))
+            .to_request();
+        let result2: Vec<ListItem> = test::call_and_read_body_json(&app, list_request2).await;
+        assert_eq!(result2.len(), 1);
+        assert_eq!(result2[0].file_name, PathBuf::from(filename2));
+
+        // Verify that token1 can still access token2's file via serve endpoint
+        let serve_request = TestRequest::get()
+            .uri(&format!("/{filename2}"))
+            .insert_header((AUTHORIZATION, header::HeaderValue::from_static("basic token1")))
+            .to_request();
+        let serve_response = test::call_service(&app, serve_request).await;
+        assert_eq!(StatusCode::OK, serve_response.status());
+
+        // Clean up
         fs::remove_dir_all(test_upload_dir)?;
 
         Ok(())
