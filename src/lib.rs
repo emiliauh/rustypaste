@@ -49,3 +49,9 @@ pub const DELETE_TOKEN_ENV: &str = "DELETE_TOKEN";
 
 /// Environment variable for the path to a file containing multiple deletion token.
 pub const DELETE_TOKENS_FILE_ENV: &str = "DELETE_TOKENS_FILE";
+
+/// Environment variable for setting a unified token (for both auth and delete).
+pub const TOKEN_ENV: &str = "TOKEN";
+
+/// Environment variable for the path to a file containing multiple unified tokens.
+pub const TOKENS_FILE_ENV: &str = "TOKENS_FILE";
