@@ -76,6 +76,22 @@ pub struct ServerConfig {
     /// Unified tokens for both authentication and deletion.
     /// Each token grants both upload and delete permissions for the token's folder.
     pub tokens: Option<HashSet<String>>,
+    /// CORS configuration.
+    pub cors: Option<CorsConfig>,
+}
+
+/// CORS (Cross-Origin Resource Sharing) configuration.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CorsConfig {
+    /// Allowed origins (e.g., "https://paste.example.com").
+    /// Can be a single origin, multiple origins, or "*" for any origin.
+    pub allowed_origins: Vec<String>,
+    /// Allowed HTTP methods (e.g., "GET", "POST", "DELETE", "OPTIONS").
+    #[serde(default)]
+    pub allowed_methods: Vec<String>,
+    /// Allowed request headers (e.g., "Authorization", "Content-Type").
+    #[serde(default)]
+    pub allowed_headers: Vec<String>,
 }
 
 /// Enum representing different strategies for handling spaces in filenames.
@@ -434,6 +450,26 @@ mod tests {
         assert!(!delete_tokens
             .as_ref()
             .is_some_and(|t| t.contains("auth_only_token")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cors_config() -> Result<(), ConfigError> {
+        let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.toml");
+        let mut config = Config::parse(&config_path)?;
+
+        // Test that CORS configuration can be set
+        config.server.cors = Some(CorsConfig {
+            allowed_origins: vec!["https://paste.example.com".to_string()],
+            allowed_methods: vec!["GET".to_string(), "POST".to_string(), "DELETE".to_string(), "OPTIONS".to_string()],
+            allowed_headers: vec!["Authorization".to_string(), "Content-Type".to_string()],
+        });
+
+        let cors = config.server.cors.as_ref().unwrap();
+        assert_eq!(cors.allowed_origins, vec!["https://paste.example.com"]);
+        assert_eq!(cors.allowed_methods, vec!["GET", "POST", "DELETE", "OPTIONS"]);
+        assert_eq!(cors.allowed_headers, vec!["Authorization", "Content-Type"]);
 
         Ok(())
     }

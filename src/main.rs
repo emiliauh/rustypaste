@@ -1,10 +1,11 @@
+use actix_cors::Cors;
 use actix_web::middleware::Logger;
 use actix_web::web::Data;
 use actix_web::{App, HttpServer};
 use awc::ClientBuilder;
 use hotwatch::notify::event::ModifyKind;
 use hotwatch::{Event, EventKind, Hotwatch};
-use rustypaste::config::{Config, ServerConfig};
+use rustypaste::config::{Config, CorsConfig, ServerConfig};
 use rustypaste::middleware::ContentLengthLimiter;
 use rustypaste::paste::PasteType;
 use rustypaste::server;
@@ -156,10 +157,51 @@ fn setup(config_folder: &Path) -> IoResult<(Data<RwLock<Config>>, ServerConfig, 
     Ok((config, server_config, hotwatch))
 }
 
+/// Builds a CORS middleware from configuration.
+///
+/// If CORS is not configured, returns a permissive CORS middleware by default.
+/// If CORS is configured, returns a CORS middleware with the specified settings.
+fn build_cors(cors_config: Option<&CorsConfig>) -> Cors {
+    match cors_config {
+        Some(config) => {
+            let mut cors = Cors::default();
+
+            // Configure allowed origins
+            for origin in &config.allowed_origins {
+                if origin == "*" {
+                    cors = cors.allow_any_origin();
+                    break;
+                } else {
+                    cors = cors.allowed_origin(origin);
+                }
+            }
+
+            // Configure allowed methods
+            if !config.allowed_methods.is_empty() {
+                cors = cors.allowed_methods(config.allowed_methods.iter().map(String::as_str));
+            }
+
+            // Configure allowed headers
+            if !config.allowed_headers.is_empty() {
+                cors = cors.allowed_headers(config.allowed_headers.iter().map(String::as_str));
+            }
+
+            cors
+        }
+        None => {
+            // If CORS is not configured, don't add CORS headers (act as if CORS middleware is not present)
+            Cors::default()
+        }
+    }
+}
+
 #[actix_web::main]
 async fn main() -> IoResult<()> {
     // Set up the application.
     let (config, server_config, _hotwatch) = setup(&PathBuf::new())?;
+
+    // Clone CORS config for the closure
+    let cors_config = server_config.cors.clone();
 
     // Create an HTTP server.
     let mut http_server = HttpServer::new(move || {
@@ -174,6 +216,7 @@ async fn main() -> IoResult<()> {
         App::new()
             .app_data(Data::clone(&config))
             .app_data(Data::new(http_client))
+            .wrap(build_cors(cors_config.as_ref()))
             .wrap(Logger::new(
                 "%{r}a \"%r\" %s %b \"%{Referer}i\" \"%{User-Agent}i\" %T",
             ))

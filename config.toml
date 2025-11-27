@@ -26,6 +26,12 @@ expose_list = false
 #  "super_secret_token3",
 #]
 handle_spaces = "replace" # or "encode"
+# CORS (Cross-Origin Resource Sharing) configuration.
+# Uncomment and configure to allow cross-origin requests from web frontends.
+#[server.cors]
+#allowed_origins = ["https://paste.example.com"]
+#allowed_methods = ["GET", "POST", "DELETE", "OPTIONS"]
+#allowed_headers = ["Authorization", "Content-Type"]
 
 [landing_page]
 text = """
