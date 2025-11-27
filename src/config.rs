@@ -4,6 +4,7 @@ use crate::{
     AUTH_TOKENS_FILE_ENV, AUTH_TOKEN_ENV, DELETE_TOKENS_FILE_ENV, DELETE_TOKEN_ENV,
     TOKENS_FILE_ENV, TOKEN_ENV,
 };
+use actix_cors::Cors;
 use byte_unit::Byte;
 use config::{self, ConfigError};
 use std::collections::HashSet;
@@ -76,6 +77,51 @@ pub struct ServerConfig {
     /// Unified tokens for both authentication and deletion.
     /// Each token grants both upload and delete permissions for the token's folder.
     pub tokens: Option<HashSet<String>>,
+    /// CORS configuration.
+    pub cors: Option<CorsConfig>,
+}
+
+/// CORS (Cross-Origin Resource Sharing) configuration.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CorsConfig {
+    /// Allowed origins (e.g., "https://paste.example.com").
+    /// Can be a single origin, multiple origins, or "*" for any origin.
+    pub allowed_origins: Vec<String>,
+    /// Allowed HTTP methods (e.g., "GET", "POST", "DELETE", "OPTIONS").
+    #[serde(default)]
+    pub allowed_methods: Vec<String>,
+    /// Allowed request headers (e.g., "Authorization", "Content-Type").
+    #[serde(default)]
+    pub allowed_headers: Vec<String>,
+}
+
+impl CorsConfig {
+    /// Builds a CORS middleware from this configuration.
+    pub fn build(&self) -> Cors {
+        let mut cors = Cors::default();
+
+        // Configure allowed origins
+        for origin in &self.allowed_origins {
+            if origin == "*" {
+                cors = cors.allow_any_origin();
+                break;
+            } else {
+                cors = cors.allowed_origin(origin);
+            }
+        }
+
+        // Configure allowed methods
+        if !self.allowed_methods.is_empty() {
+            cors = cors.allowed_methods(self.allowed_methods.iter().map(String::as_str));
+        }
+
+        // Configure allowed headers
+        if !self.allowed_headers.is_empty() {
+            cors = cors.allowed_headers(self.allowed_headers.iter().map(String::as_str));
+        }
+
+        cors
+    }
 }
 
 /// Enum representing different strategies for handling spaces in filenames.
@@ -434,6 +480,26 @@ mod tests {
         assert!(!delete_tokens
             .as_ref()
             .is_some_and(|t| t.contains("auth_only_token")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cors_config() -> Result<(), ConfigError> {
+        let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.toml");
+        let mut config = Config::parse(&config_path)?;
+
+        // Test that CORS configuration can be set
+        config.server.cors = Some(CorsConfig {
+            allowed_origins: vec!["https://paste.example.com".to_string()],
+            allowed_methods: vec!["GET".to_string(), "POST".to_string(), "DELETE".to_string(), "OPTIONS".to_string()],
+            allowed_headers: vec!["Authorization".to_string(), "Content-Type".to_string()],
+        });
+
+        let cors = config.server.cors.as_ref().unwrap();
+        assert_eq!(cors.allowed_origins, vec!["https://paste.example.com"]);
+        assert_eq!(cors.allowed_methods, vec!["GET", "POST", "DELETE", "OPTIONS"]);
+        assert_eq!(cors.allowed_headers, vec!["Authorization", "Content-Type"]);
 
         Ok(())
     }

@@ -529,7 +529,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::LandingPageConfig;
+    use crate::config::{CorsConfig, LandingPageConfig};
     use crate::middleware::ContentLengthLimiter;
     use crate::random::{RandomURLConfig, RandomURLType};
     use actix_web::body::MessageBody;
@@ -1588,6 +1588,76 @@ mod tests {
         // Cleanup
         fs::remove_dir_all(url_upload_path)?;
 
+        Ok(())
+    }
+
+    #[actix_web::test]
+    async fn test_cors_headers() -> Result<(), Error> {
+        let cors_config = CorsConfig {
+            allowed_origins: vec!["https://paste.example.com".to_string()],
+            allowed_methods: vec!["GET".to_string(), "POST".to_string(), "DELETE".to_string(), "OPTIONS".to_string()],
+            allowed_headers: vec!["Authorization".to_string(), "Content-Type".to_string()],
+        };
+
+        let app = test::init_service(
+            App::new()
+                .app_data(Data::new(RwLock::new(Config::default())))
+                .app_data(Data::new(Client::default()))
+                .wrap(cors_config.build())
+                .configure(configure_routes),
+        )
+        .await;
+
+        // Send a preflight OPTIONS request with an Origin header
+        let request = TestRequest::default()
+            .method(actix_web::http::Method::OPTIONS)
+            .insert_header(("Origin", "https://paste.example.com"))
+            .insert_header(("Access-Control-Request-Method", "POST"))
+            .insert_header(("Access-Control-Request-Headers", "Authorization, Content-Type"))
+            .uri("/")
+            .to_request();
+        let response = test::call_service(&app, request).await;
+        
+        // Check CORS headers are present
+        assert!(response.headers().contains_key("access-control-allow-origin"));
+        assert_eq!(
+            response.headers().get("access-control-allow-origin").unwrap().to_str().unwrap(),
+            "https://paste.example.com"
+        );
+        
+        Ok(())
+    }
+
+    #[actix_web::test]
+    async fn test_cors_wildcard_origin() -> Result<(), Error> {
+        let cors_config = CorsConfig {
+            allowed_origins: vec!["*".to_string()],
+            allowed_methods: vec!["GET".to_string()],
+            allowed_headers: vec![],
+        };
+
+        let app = test::init_service(
+            App::new()
+                .app_data(Data::new(RwLock::new(Config::default())))
+                .app_data(Data::new(Client::default()))
+                .wrap(cors_config.build())
+                .configure(configure_routes),
+        )
+        .await;
+
+        // Send a request with an Origin header
+        let request = TestRequest::get()
+            .insert_header(("Origin", "https://any-origin.com"))
+            .uri("/")
+            .to_request();
+        let response = test::call_service(&app, request).await;
+        
+        // With wildcard, any origin should be allowed - actix-cors echoes the origin back
+        assert!(response.headers().contains_key("access-control-allow-origin"));
+        let allowed_origin = response.headers().get("access-control-allow-origin").unwrap().to_str().unwrap();
+        // When allow_any_origin() is used, actix-cors echoes back the request origin
+        assert!(allowed_origin == "*" || allowed_origin == "https://any-origin.com");
+        
         Ok(())
     }
 }
