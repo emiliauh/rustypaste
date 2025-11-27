@@ -4,6 +4,7 @@ use crate::{
     AUTH_TOKENS_FILE_ENV, AUTH_TOKEN_ENV, DELETE_TOKENS_FILE_ENV, DELETE_TOKEN_ENV,
     TOKENS_FILE_ENV, TOKEN_ENV,
 };
+use actix_cors::Cors;
 use byte_unit::Byte;
 use config::{self, ConfigError};
 use std::collections::HashSet;
@@ -92,6 +93,35 @@ pub struct CorsConfig {
     /// Allowed request headers (e.g., "Authorization", "Content-Type").
     #[serde(default)]
     pub allowed_headers: Vec<String>,
+}
+
+impl CorsConfig {
+    /// Builds a CORS middleware from this configuration.
+    pub fn build(&self) -> Cors {
+        let mut cors = Cors::default();
+
+        // Configure allowed origins
+        for origin in &self.allowed_origins {
+            if origin == "*" {
+                cors = cors.allow_any_origin();
+                break;
+            } else {
+                cors = cors.allowed_origin(origin);
+            }
+        }
+
+        // Configure allowed methods
+        if !self.allowed_methods.is_empty() {
+            cors = cors.allowed_methods(self.allowed_methods.iter().map(String::as_str));
+        }
+
+        // Configure allowed headers
+        if !self.allowed_headers.is_empty() {
+            cors = cors.allowed_headers(self.allowed_headers.iter().map(String::as_str));
+        }
+
+        cors
+    }
 }
 
 /// Enum representing different strategies for handling spaces in filenames.

@@ -532,7 +532,6 @@ mod tests {
     use crate::config::{CorsConfig, LandingPageConfig};
     use crate::middleware::ContentLengthLimiter;
     use crate::random::{RandomURLConfig, RandomURLType};
-    use actix_cors::Cors;
     use actix_web::body::MessageBody;
     use actix_web::body::{BodySize, BoxBody};
     use actix_web::error::Error;
@@ -1592,38 +1591,6 @@ mod tests {
         Ok(())
     }
 
-    /// Builds a CORS middleware from configuration for testing.
-    fn build_cors(cors_config: Option<&CorsConfig>) -> Cors {
-        match cors_config {
-            Some(config) => {
-                let mut cors = Cors::default();
-
-                // Configure allowed origins
-                for origin in &config.allowed_origins {
-                    if origin == "*" {
-                        cors = cors.allow_any_origin();
-                        break;
-                    } else {
-                        cors = cors.allowed_origin(origin);
-                    }
-                }
-
-                // Configure allowed methods
-                if !config.allowed_methods.is_empty() {
-                    cors = cors.allowed_methods(config.allowed_methods.iter().map(String::as_str));
-                }
-
-                // Configure allowed headers
-                if !config.allowed_headers.is_empty() {
-                    cors = cors.allowed_headers(config.allowed_headers.iter().map(String::as_str));
-                }
-
-                cors
-            }
-            None => Cors::default(),
-        }
-    }
-
     #[actix_web::test]
     async fn test_cors_headers() -> Result<(), Error> {
         let cors_config = CorsConfig {
@@ -1636,7 +1603,7 @@ mod tests {
             App::new()
                 .app_data(Data::new(RwLock::new(Config::default())))
                 .app_data(Data::new(Client::default()))
-                .wrap(build_cors(Some(&cors_config)))
+                .wrap(cors_config.build())
                 .configure(configure_routes),
         )
         .await;
@@ -1673,7 +1640,7 @@ mod tests {
             App::new()
                 .app_data(Data::new(RwLock::new(Config::default())))
                 .app_data(Data::new(Client::default()))
-                .wrap(build_cors(Some(&cors_config)))
+                .wrap(cors_config.build())
                 .configure(configure_routes),
         )
         .await;
